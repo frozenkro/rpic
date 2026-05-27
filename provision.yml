@@ -1,0 +1,107 @@
+# ansible-playbook -i inventory.yml provision.yml --ask-pass -K
+
+- name: Provision rpic k3s cluster nodes
+  hosts: rpic
+  become: yes
+  tasks:
+    - name: Enable vi mode
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        line: "set -o vi"
+        state: present
+      become: no
+
+    - name: Ensure cgroup_memory=1 in cmdline.txt
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(?!.*\bcgroup_memory=1\b)(.*)$'
+        replace: '\1 cgroup_memory=1'
+
+    - name: Ensure cgroup_enable=memory in cmdline.txt
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(?!.*\bcgroup_enable=memory\b)(.*)$'
+        replace: '\1 cgroup_enable=memory'
+
+    - name: Check if eth0-switch connection exists
+      ansible.builtin.command: nmcli -g NAME connection show
+      register: nm_connections
+      changed_when: false
+      failed_when: false
+
+    - name: Create eth0 static connection via NetworkManager
+      ansible.builtin.command: >
+        nmcli connection add type ethernet ifname eth0 con-name eth0-switch
+        ipv4.method manual ipv4.addresses {{ eth0_ip }}/24
+      when: "'eth0-switch' not in nm_connections.stdout"
+
+    - name: Ensure eth0-switch connection is up
+      ansible.builtin.command: nmcli connection up eth0-switch
+      when: "'eth0-switch' not in nm_connections.stdout"
+
+    # ---tailscale---
+    - name: Ensure python3-debian is installed
+      ansible.builtin.apt:
+        name:
+          - python3-debian
+          - python3-apt
+        state: present
+
+    - name: Tailscale repo configured
+      ansible.builtin.deb822_repository:
+        name: tailscale-stable
+        types: [deb]
+        uris: "https://pkgs.tailscale.com/stable/{{ ansible_facts['distribution']|lower }}"
+        signed_by: "https://pkgs.tailscale.com/stable/{{ ansible_facts['distribution']|lower }}/{{ ansible_facts['distribution_release']|lower }}.asc"
+        suites: ["{{ ansible_facts['distribution_release']|lower }}"]
+        components: [main]
+        state: present
+        enabled: yes
+
+    - name: Tailscale installed
+      ansible.builtin.apt:
+        name: tailscale
+        state: present
+        update_cache: yes
+
+    - name: Check if tailscale is authenticated
+      ansible.builtin.command: tailscale status
+      register: tailscale_status
+      changed_when: false
+      failed_when: false
+
+    - name: Authenticate tailscale
+      ansible.builtin.command: tailscale up --auth-key={{ tailscale_auth_key }}
+      when: tailscale_status.rc != 0
+
+    - name: Ensure tailscaled is running and enabled
+      ansible.builtin.service:
+        name: tailscaled
+        state: started
+        enabled: yes
+
+    # ---k3s---
+    - name: Check if k3s is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Install k3s (server node)
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io |
+        K3S_TOKEN={{ k3s_token }} sh -s - server --tls-san={{ eth0_ip }}
+      when:
+        - not k3s_binary.stat.exists
+        - k3s_role == "server"
+
+    - name: Install k3s (agent node)
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io |
+        K3S_URL={{ k3s_url }} K3S_TOKEN={{ k3s_token }} sh -
+      when:
+        - not k3s_binary.stat.exists
+        - k3s_role == "agent"
+
+    - name: Reboot to apply cmdline changes
+      ansible.builtin.reboot:
+        reboot_timeout: 300
