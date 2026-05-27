@@ -102,6 +102,8 @@
         - not k3s_binary.stat.exists
         - k3s_role == "agent"
 
+    # only needed for network changes
+    # can be disabled to save time otherwise
     - name: Reboot to apply cmdline changes
       ansible.builtin.reboot:
         reboot_timeout: 300
