@@ -25,4 +25,3 @@ Config:
   inventory.yml          hosts and per-host vars (ip, role)
   group_vars/rpic.yml    tailscale auth key, k3s url/token
   provision.yml          the playbook
-  user_data.sh           my original shell attempt (superseded)
